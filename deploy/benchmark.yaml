@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mini-pgbench
+data:
+  config.yaml: |
+    postgres:
+      hosts: [postgres.example.internal]
+      port: 5432
+      database: benchmark
+      user: benchmark
+      password: ""
+      sslmode: verify-full
+      sslrootcert: /tls/ca.crt
+      sslcert: /tls/client.crt
+      sslkey: /tls/client.key
+    pool:
+      max_open: 10
+      max_idle: 10
+      max_lifetime: 30m
+      max_idle_time: 5m
+    workers: 4
+    rows: 100000
+    read_weight: 80
+    write_weight: 20
+    transaction_timeout: 0s
+    listen: :8080
+    sqlite_path: /data/results.db
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mini-pgbench
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  containers:
+    - name: benchmark
+      image: ghcr.io/djosh34/mini_pgbench:latest
+      ports:
+        - containerPort: 8080
+      volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+        - name: results
+          mountPath: /data
+  volumes:
+    - name: config
+      configMap:
+        name: mini-pgbench
+    - name: tls
+      secret:
+        secretName: mini-pgbench-tls
+        defaultMode: 0440
+    - name: results
+      emptyDir: {}

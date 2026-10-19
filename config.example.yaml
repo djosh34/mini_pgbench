@@ -1,0 +1,22 @@
+postgres:
+  hosts: [localhost]
+  port: 5432
+  database: benchmark
+  user: benchmark
+  password: ""
+  sslmode: verify-full
+  sslrootcert: /tls/ca.crt
+  sslcert: /tls/client.crt
+  sslkey: /tls/client.key
+pool:
+  max_open: 10
+  max_idle: 10
+  max_lifetime: 30m
+  max_idle_time: 5m
+workers: 4
+rows: 100000
+read_weight: 80
+write_weight: 20
+transaction_timeout: 0s
+listen: :8080
+sqlite_path: /data/results.db
