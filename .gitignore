@@ -1,0 +1,5 @@
+/bin/
+/config.yaml
+*.db
+*.db-*
+/image*.tar
