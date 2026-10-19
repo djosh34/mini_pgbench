@@ -90,9 +90,8 @@ func TestPostgres(t *testing.T) {
 		a.stop()
 	}
 	a.close()
-	if pool.Stats().InUse != 0 {
-		t.Fatal("workers left connections in use")
-	}
+	// database/sql may finish cancellation-triggered rollback asynchronously.
+	waitFor(t, func() bool { return pool.Stats().InUse == 0 })
 	if err = db.Exec("DROP TABLE mini_pgbench_accounts").Error; err != nil {
 		t.Fatal(err)
 	}

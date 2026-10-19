@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func testStats(t *testing.T) *Stats {
@@ -58,6 +60,32 @@ func TestConfig(t *testing.T) {
 	os.WriteFile(p, []byte(strings.Replace(base, "sslmode: disable", "sslmode: verify-full\n  sslrootcert: /nonexistent", 1)), 0600)
 	if _, err := loadConfig(p); err == nil {
 		t.Fatal("missing certificate accepted")
+	}
+}
+
+func TestYAMLOverridesAmbientPostgresSettings(t *testing.T) {
+	for key, value := range map[string]string{
+		"PGSERVICE": "nonexistent", "PGSERVICEFILE": "/nonexistent/service.conf",
+		"PGOPTIONS": "-c default_transaction_read_only=on", "PGTARGETSESSIONATTRS": "read-only",
+		"PGHOST": "wrong-host", "PGDATABASE": "wrong-database", "PGSSLMODE": "not-a-mode",
+	} {
+		t.Setenv(key, value)
+	}
+	clearPostgresEnv()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("postgres:\n  hosts: [yaml-host]\n  database: yaml-database\n  user: yaml-user\n  sslmode: disable\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := pgx.ParseConfig(c.dsn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Host != "yaml-host" || parsed.Database != "yaml-database" || parsed.User != "yaml-user" || parsed.TLSConfig != nil || parsed.ValidateConnect != nil || parsed.RuntimeParams["options"] != "" {
+		t.Fatalf("ambient PostgreSQL settings affected YAML: %+v", parsed.Config)
 	}
 }
 

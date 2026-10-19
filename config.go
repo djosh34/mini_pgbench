@@ -38,6 +38,20 @@ type Config struct {
 	SQLitePath         string        `yaml:"sqlite_path"`
 }
 
+// Clear libpq/pgx environment inputs once at startup: YAML is the only source
+// of connection settings, including when a shell has PGSERVICE or PGOPTIONS set.
+func clearPostgresEnv() {
+	for _, key := range []string{
+		"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPASSFILE",
+		"PGAPPNAME", "PGCONNECT_TIMEOUT", "PGSSLMODE", "PGSSLKEY", "PGSSLCERT",
+		"PGSSLSNI", "PGSSLROOTCERT", "PGSSLPASSWORD", "PGSSLNEGOTIATION",
+		"PGTARGETSESSIONATTRS", "PGSERVICE", "PGSERVICEFILE", "PGTZ", "PGOPTIONS",
+		"PGMINPROTOCOLVERSION", "PGMAXPROTOCOLVERSION", "PGCHANNELBINDING", "PGREQUIREAUTH",
+	} {
+		_ = os.Unsetenv(key)
+	}
+}
+
 func loadConfig(path string) (Config, error) {
 	var c Config
 	c.Postgres.Port = 5432

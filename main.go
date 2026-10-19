@@ -15,6 +15,7 @@ import (
 
 func run() error {
 	started := time.Now()
+	clearPostgresEnv()
 	path := flag.String("config", "config.yaml", "static YAML configuration path")
 	flag.Parse()
 	c, err := loadConfig(*path)

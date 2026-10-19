@@ -121,7 +121,10 @@ After this implementation is reviewed and merged, the main workflow publishes
 `ghcr.io/djosh34/mini_pgbench:latest` and `:<full-commit-SHA>`. Each tag is one
 multi-platform image index for **linux/amd64 and linux/arm64**; there are no
 architecture-specific user tags. Publication is not performed by PR CI. GHCR
-package visibility/access must allow your Docker/Kubernetes environment to pull it.
+package must be made **public** in its GitHub package settings after the first
+publication for anonymous Docker/Kubernetes pulls (the sample Pod has no pull
+secret). GitHub creates new container packages private by default; repository
+visibility does not change this. Verify anonymous pulls before deploying.
 
 ## Kubernetes
 
@@ -193,12 +196,16 @@ changes, process shutdown and fatal SQLite-write behavior. Only the fixture's
 administrator creates its disposable test database.
 
 PR and main CI run tests, race tests, vet, pure-Go builds, mTLS integration and image
-scans on both native architectures. Main publication depends on both passing.
+scans on both native architectures. Main publication depends on both passing, then
+builds one final multi-platform OCI archive, scans each platform in that archive,
+and copies that same archive to both shared GHCR tags using Skopeo. It does not
+rebuild after release scans.
 Trivy rejects every HIGH/CRITICAL finding, **including unfixed** findings, with no
 suppression file. Remediate actual dependency/runtime findings rather than bypassing
 the gate. Clean scans describe the database at scan time, not a future guarantee.
 
-Go and direct dependencies were resolved from their stable upstream releases at
-implementation time and are pinned in `go.mod`/`go.sum`. Keep the project small:
+Go and dependencies, including runtime indirect modules, were resolved from their
+latest stable upstream releases at implementation time and are pinned in
+`go.mod`/`go.sum`. Keep the project small:
 additional production frameworks, speculative hardening machinery, custom integrity
 gates, host orchestration and features outside this test-tool scope are not goals.

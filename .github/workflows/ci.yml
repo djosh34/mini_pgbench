@@ -50,11 +50,22 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/djosh34/mini_pgbench:latest
-            ghcr.io/djosh34/mini_pgbench:${{ github.sha }}
+      - name: Build final multi-platform release archive
+        run: docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --output type=oci,dest=image.tar .
+      - name: Install archive copy tool
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Scan both final release platforms before publishing
+        run: |
+          for arch in amd64 arm64; do
+            skopeo copy --override-os linux --override-arch "$arch" \
+              oci-archive:image.tar docker-archive:scan-$arch.tar
+            docker run --rm -v "$PWD:/work:ro" aquasec/trivy:0.76.0 image \
+              --input /work/scan-$arch.tar --scanners vuln \
+              --severity HIGH,CRITICAL --exit-code 1 --ignorefile /dev/null
+          done
+      - name: Publish the scanned archive to both shared tags
+        run: |
+          for tag in "${{ github.sha }}" latest; do
+            skopeo copy --all --authfile "$HOME/.docker/config.json" \
+              oci-archive:image.tar docker://ghcr.io/djosh34/mini_pgbench:$tag
+          done
