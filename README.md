@@ -28,7 +28,9 @@ balances or deletes rows. Do not use that table for anything else.
 
 Each worker runs one transaction at a time, with no rate limit. A read is a
 `SELECT balance` and a write is an `UPDATE ... SET balance = balance + 1` on a
-random id. A failed transaction counts as one error, and that worker waits 100 ms
+random id. The worker sends `BEGIN`, the statement and `COMMIT` together as one
+pgx batch on a connection from a pgxpool pool, so a transaction takes one network
+round trip. A failed transaction counts as one error, and that worker waits 100 ms
 before the next one. There are no retries.
 
 ## Configuration
@@ -46,7 +48,8 @@ it. It ignores the `PG*` environment variables. See
 | `postgres.sslmode` | `verify-full` | `disable`, `allow`, `prefer`, `require`, `verify-ca` or `verify-full` |
 | `postgres.sslrootcert` | empty | CA file |
 | `postgres.sslcert`, `postgres.sslkey` | empty | Client certificate and key for mTLS, both or neither |
-| `pool.max_open`, `pool.max_idle` | `10`, `10` | Connection pool size; idle must not exceed open |
+| `pool.max_open` | `10` | Maximum number of PostgreSQL connections |
+| `pool.max_idle` | `10` | No effect, pgxpool has no idle limit. Still accepted so older configs load; must not exceed `max_open` |
 | `pool.max_lifetime`, `pool.max_idle_time` | `0s` | Go durations such as `30m`; `0s` means no limit |
 | `workers` | `4` | Number of workers |
 | `rows` | `100000` | Number of account rows |
@@ -155,11 +158,16 @@ rate(mini_pgbench_transactions_total[1m])
 rate(mini_pgbench_errors_total[1m])
 histogram_quantile(0.95, sum by (le) (rate(mini_pgbench_transaction_duration_seconds_bucket[1m])))
 mini_pgbench_running
-go_sql_in_use_connections{db_name="postgres"}
+mini_pgbench_pool_in_use_connections
 ```
 
-The latency histogram has buckets from 50 µs to 60 s. The `go_sql_*` metrics
-describe the PostgreSQL connection pool.
+The latency histogram has buckets from 50 µs to 60 s. The `mini_pgbench_pool_*`
+metrics describe the PostgreSQL connection pool: `max_connections`,
+`connections`, `in_use_connections` and `idle_connections` are gauges.
+`acquires_total`, `waits_total`, `wait_seconds_total`, `canceled_acquires_total`,
+`new_connections_total`, `max_lifetime_closed_total` and
+`max_idle_time_closed_total` are counters. A wait is an acquire that found no idle
+connection.
 
 ## Tests
 
