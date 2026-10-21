@@ -79,14 +79,14 @@ func TestPostgres(t *testing.T) {
 	if pool.Stats().MaxOpenConnections != 2 {
 		t.Fatal("pool max open")
 	}
-	// Cancellation must interrupt a transaction blocked in PostgreSQL, not just a fake operation.
+	// Cancelling the context must interrupt a query that is blocked inside PostgreSQL.
 	short, stop := context.WithTimeout(ctx, 30*time.Millisecond)
 	defer stop()
 	start := time.Now()
 	if err = db.WithContext(short).Exec("SELECT pg_sleep(10)").Error; err == nil || time.Since(start) > time.Second {
 		t.Fatalf("query cancellation: %v", err)
 	}
-	// Timeout includes waiting to acquire the only available connection.
+	// The timeout also covers the wait for the only pool connection.
 	pool.SetMaxOpenConns(1)
 	held, err := pool.Conn(ctx)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestPostgres(t *testing.T) {
 		a.stop()
 	}
 	a.close()
-	// database/sql may finish cancellation-triggered rollback asynchronously.
+	// database/sql can finish the rollback after a cancellation in the background.
 	waitFor(t, func() bool { return pool.Stats().InUse == 0 })
 	if err = db.Exec("DROP TABLE mini_pgbench_accounts").Error; err != nil {
 		t.Fatal(err)
