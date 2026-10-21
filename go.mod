@@ -1,6 +1,6 @@
 module github.com/djosh34/mini_pgbench
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/HdrHistogram/hdrhistogram-go v1.4.0
@@ -9,14 +9,13 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5
 	gorm.io/driver/postgres v1.6.3
 	gorm.io/gorm v1.31.2
-	modernc.org/sqlite v1.60.1
+	modernc.org/sqlite v1.61.0
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/google/pprof v0.0.0-20261016150608-1facf8f91b50 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

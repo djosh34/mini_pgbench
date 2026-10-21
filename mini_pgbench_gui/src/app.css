@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #f4f7fb;
+  --color-grid: #c4d3e3;
+  --color-ink: #17233a;
+  --color-muted: #5b6b80;
+  --color-tps: #1f4fbf;
+  --color-errors: #d6332b;
+  --color-run: #17985a;
+  --color-stopped: #c58a12;
+  --font-sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-display: "Bahnschrift", "DIN Alternate", "Roboto Condensed", "Arial Narrow", sans-serif;
+}
+
+body {
+  @apply bg-paper font-sans text-ink antialiased;
+}
+
+@utility btn {
+  @apply border border-grid bg-white px-3 py-1.5 text-sm font-medium text-ink tabular-nums;
+  &:hover:not(:disabled, [aria-pressed="true"]) {
+    @apply bg-paper;
+  }
+  &:focus-visible {
+    @apply relative z-10 outline-2 outline-offset-2 outline-tps;
+  }
+  &:disabled {
+    @apply cursor-default text-muted/50;
+  }
+  &[aria-pressed="true"] {
+    @apply relative z-[1] border-tps bg-tps text-white;
+  }
+}

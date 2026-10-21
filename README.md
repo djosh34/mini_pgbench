@@ -1,105 +1,114 @@
 # mini_pgbench
 
-A small, deliberately unsecured PostgreSQL load tool: one Go binary, one multi-host
-cluster connection pool, fixed workers, JSON controls and Prometheus metrics. It
-starts **paused**. There is no UI, authentication, application retry, rate limiter,
-script engine or database creation.
+mini_pgbench puts a steady read and write load on a PostgreSQL database and records
+transactions per second, errors and latency. It is one Go binary with an HTTP API
+and Prometheus metrics. A separate local web GUI, `mini_pgbench_gui`, charts the
+results.
 
-## Prerequisites
+The workload starts as soon as the benchmark table is ready. `POST /stop` pauses
+it and `POST /start` resumes it.
 
-- An **existing PostgreSQL database** and role allowed to create/use
-  `mini_pgbench_accounts` in its default schema. `CREATEDB` is not required.
-- Go **1.27.2** for local builds, or Docker / Kubernetes for containers.
-- A writable directory for disposable SQLite results; optional PostgreSQL TLS files.
+The HTTP API has no authentication and no TLS. Do not expose it to a network you
+do not trust. Bind it to loopback or reach it through `kubectl port-forward`.
 
-Initialization creates `mini_pgbench_accounts(id bigint PRIMARY KEY, balance bigint)`
-and inserts missing IDs from 1 through `rows`, without resetting balances or
-removing existing rows. This table belongs to this tool: do not modify it during a
-run or share it with an application. Initialization is not benchmark traffic.
+## Quick start
 
-## Configuration and local usage
+You need an existing database and a role that can create a table in its default
+schema. Go 1.27.3 builds the binary.
 
 ```sh
-cp config.example.yaml config.yaml
-# Edit connection settings and TLS paths; use sqlite_path: ./results.db locally.
+cp config.example.yaml config.yaml   # set hosts, database, user and TLS paths
 go build -o bin/mini_pgbench .
 ./bin/mini_pgbench -config config.yaml
 ```
 
-One YAML document is read once. Unknown fields and invalid counts, weights,
-durations or referenced TLS files fail startup. There are no application-setting
-environment overrides or live reloads. The full example is
+At startup mini_pgbench creates `mini_pgbench_accounts (id, balance)` if it is
+missing and inserts the ids 1 to `rows` that do not exist yet. It never resets
+balances or deletes rows. Do not use that table for anything else.
+
+Each worker runs one transaction at a time, with no rate limit. A read is a
+`SELECT balance` and a write is an `UPDATE ... SET balance = balance + 1` on a
+random id. A failed transaction counts as one error, and that worker waits 100 ms
+before the next one. There are no retries.
+
+## Configuration
+
+mini_pgbench reads one YAML file at startup. Unknown keys and invalid values stop
+it. It ignores the `PG*` environment variables. See
 [`config.example.yaml`](config.example.yaml).
 
-| Setting | Default / meaning |
-|---|---|
-| `postgres.hosts` | Required hostname/address array; passed to pgx as its ordinary host list, not separate runners |
-| `postgres.port` | `5432`, common to all hosts |
-| `postgres.database`, `postgres.user` | Required; database must already exist |
-| `postgres.password` | Empty; supply only if your PostgreSQL authentication requires it |
-| `postgres.sslmode` | `verify-full`; standard pgx `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` are supported |
-| `postgres.sslrootcert` | Optional CA file path |
-| `postgres.sslcert`, `postgres.sslkey` | Optional client certificate/key paths, supplied together for mTLS |
-| `pool.max_open`, `pool.max_idle` | `10`, `10`; max open must be positive; idle must be between zero and max open |
-| `pool.max_lifetime`, `pool.max_idle_time` | `0s` (unlimited); Go durations, e.g. `30m`, `5m` |
-| `workers` | `4`, positive fixed worker count |
-| `rows` | `100000`, positive configured ID range |
-| `read_weight`, `write_weight` | `80`, `20`; nonnegative, at least one positive; zero disables that operation |
-| `transaction_timeout` | `0s` = no imposed deadline; otherwise covers acquisition through commit |
-| `listen` | `:8080` |
-| `sqlite_path` | `results.db`; filesystem path, not a SQLite URI or in-memory database |
-
-Each worker chooses an operation by relative weight and a random configured row.
-Reads execute `SELECT balance`; writes execute `UPDATE ... SET balance = balance + 1`.
-Both use an explicit GORM transaction, including commit. There is one operation in
-flight per worker, without throttling. A failed transaction is counted once,
-followed by a context-cancellable **100ms** delay before a new independent
-transaction. There are **no application retries**. Normal pgx pool reconnection
-behavior is unchanged. TLS verification policy is your choice: insecure modes
-can permit interception. Configure the server's `pg_hba.conf` to require client
-certificates if you need mTLS.
+| Key | Default | Meaning |
+|---|---|---|
+| `postgres.hosts` | required | List of hosts, passed to pgx as one multi-host connection |
+| `postgres.port` | `5432` | Port for every host |
+| `postgres.database`, `postgres.user` | required | The database must exist |
+| `postgres.password` | empty | Only if your server asks for one |
+| `postgres.sslmode` | `verify-full` | `disable`, `allow`, `prefer`, `require`, `verify-ca` or `verify-full` |
+| `postgres.sslrootcert` | empty | CA file |
+| `postgres.sslcert`, `postgres.sslkey` | empty | Client certificate and key for mTLS, both or neither |
+| `pool.max_open`, `pool.max_idle` | `10`, `10` | Connection pool size; idle must not exceed open |
+| `pool.max_lifetime`, `pool.max_idle_time` | `0s` | Go durations such as `30m`; `0s` means no limit |
+| `workers` | `4` | Number of workers |
+| `rows` | `100000` | Number of account rows |
+| `read_weight`, `write_weight` | `80`, `20` | Relative share of reads and writes; `0` turns one off |
+| `transaction_timeout` | `0s` | Deadline per transaction, including waiting for a connection; `0s` means none |
+| `listen` | `:8080` | HTTP address |
+| `sqlite_path` | `results.db` | File for the per-second results |
 
 ## HTTP API
 
-All application responses, including errors, are JSON; only `/metrics` uses
-Prometheus exposition. A result stream interrupted after headers is aborted rather
-than returning a misleading complete result.
-
 ```sh
-curl -X POST localhost:8080/start   # idempotent
-curl localhost:8080/status
-curl -X POST localhost:8080/stop    # cancels and joins workers; idempotent
-curl localhost:8080/results
-curl localhost:8080/metrics
+curl localhost:8080/status            # {"running":true,"workers":4}
+curl -X POST localhost:8080/stop      # pause; cancels the running transactions
+curl -X POST localhost:8080/start     # resume
+curl localhost:8080/results           # every second since startup
+curl 'localhost:8080/results?limit=60' # the latest 60 seconds
+curl localhost:8080/metrics           # Prometheus
 ```
 
-`/status` returns `running` and configured `workers`. Starts/stops are serialized;
-a new start uses a fresh cancellable context. Explicit stop cancellation is not
-counted as a database error; transaction deadlines while running are errors.
-SIGINT/SIGTERM also cancel and join workers before closing storage.
-
-`/results` streams every **completed** second in chronological order:
+`/results` returns a JSON array with one row per completed second, oldest first:
 
 ```json
-[{"timestamp":"2026-10-19T12:00:00Z","tps":123,"errors":0,"p50_ms":0.7,"p95_ms":1.2,"p99_ms":2.1}]
+[{"timestamp":"2026-10-21T12:00:00Z","tps":5120,"errors":0,"p50_ms":0.5,"p95_ms":0.8,"p99_ms":1.1,"total_transactions":812345,"total_errors":3}]
 ```
 
-The timestamp is the start of a one-second process-relative window. Outcomes belong
-to their completion window; successful latency includes pool acquisition through
-commit. HdrHistogram estimates percentiles at microsecond resolution with three
-significant digits. Failed transactions do not contribute latency samples. Paused
-and initialization seconds have zero counts; zero-success windows have JSON
-`null` percentiles. The current incomplete second is not returned.
+- `tps` and `errors` count the transactions that finished in that second.
+- `p50_ms`, `p95_ms` and `p99_ms` are latencies of the committed transactions,
+  including the wait for a pool connection. They are `null` in a second without
+  commits.
+- `total_transactions` and `total_errors` count everything since the process
+  started, whatever `limit` is.
+- `limit=n` returns the latest n rows. A `limit` that is not a positive integer
+  returns 400 `{"error":"limit must be a positive integer"}`.
 
-History is reset on **every process start**, even when the same volume survives a
-container restart. All completed seconds are retained for that process lifetime;
-there is no persistent history, pagination or session model. SQLite has one summary
-writer; a write failure logs an error, stops workers and **exits nonzero**. Large or
-slow result downloads can delay the SQLite writer; this is a small test tool, not a
-history service.
+A transaction cancelled by `/stop` is not an error. A transaction that hits
+`transaction_timeout` is.
 
-**Never expose the HTTP port to an untrusted network.** It has no authentication or
-TLS. Bind to loopback locally or use `kubectl port-forward`.
+The history lives in SQLite and starts empty at every process start. If writing
+to SQLite fails, mini_pgbench stops the workers and exits with an error.
+
+## GUI
+
+`mini_pgbench_gui` runs on your machine and talks to the API through a port-forward.
+Installing it needs only Go.
+
+```sh
+go install github.com/djosh34/mini_pgbench/mini_pgbench_gui@latest
+kubectl port-forward pod/mini-pgbench 8080:8080
+mini_pgbench_gui            # prints the URL to open, http://127.0.0.1:5173
+```
+
+Use `-api http://localhost:9090` if the port-forward uses another port, and
+`-listen` to change the GUI address.
+
+The GUI charts transactions and errors per second for the last 5 minutes to
+24 hours, or the whole run. It shows the totals and the running state, and has
+Start and Stop buttons. It asks for new rows every 2 seconds. Pause updates
+stops that. The browser remembers the range and the pause setting.
+
+To work on the GUI, run `pnpm install` and `pnpm dev` in `mini_pgbench_gui/` with
+a benchmark on `localhost:8080`. Commit the output of `pnpm build` in `dist/`:
+`go install` serves those files.
 
 ## Docker
 
@@ -112,23 +121,17 @@ docker run --rm -p 127.0.0.1:8080:8080 \
   mini_pgbench
 ```
 
-The scratch runtime contains the pure-Go binary and CA roots, and runs as UID/GID
-65532. TLS files must be readable by that user; bind-mounted data directories must
-be writable by it. `localhost` in a container is the container, not your database
-host. Omit the TLS mount only if your configuration does not reference TLS files.
+The image is `scratch` with the binary and CA certificates. It runs as UID and GID
+65532, so that user must be able to read the TLS files and write `/data`. Inside
+the container, `localhost` is the container itself.
 
-After this implementation is reviewed and merged, the main workflow publishes
-`ghcr.io/djosh34/mini_pgbench:latest` and `:<full-commit-SHA>`. Each tag is one
-multi-platform image index for **linux/amd64 and linux/arm64**; there are no
-architecture-specific user tags. Publication is not performed by PR CI. GHCR
-package must be made **public** in its GitHub package settings after the first
-publication for anonymous Docker/Kubernetes pulls (the sample Pod has no pull
-secret). GitHub creates new container packages private by default; repository
-visibility does not change this. Verify anonymous pulls before deploying.
+Every push to `main` publishes `ghcr.io/djosh34/mini_pgbench:latest` and
+`:<commit sha>` for linux/amd64 and linux/arm64.
 
 ## Kubernetes
 
-Edit hosts/database/user in [`deploy/benchmark.yaml`](deploy/benchmark.yaml), then:
+Set the hosts, database and user in [`deploy/benchmark.yaml`](deploy/benchmark.yaml),
+then:
 
 ```sh
 kubectl create secret generic mini-pgbench-tls \
@@ -139,73 +142,33 @@ kubectl apply -f deploy/benchmark.yaml
 kubectl port-forward pod/mini-pgbench 8080:8080
 ```
 
-This is only a Pod and ConfigMap, with a **pre-created** TLS Secret and `emptyDir`.
-The sample uses certificate authentication and contains no real credentials. If a
-password is necessary, do not commit it in the manifest; mount a privately prepared
-configuration from a Secret instead. Secret and configuration changes are not
-reloaded: recreate the Pod. `emptyDir` survives container restarts, but application
-startup still clears history. No Service, Deployment, PVC, Helm chart or operator
-is required.
+The manifest has a ConfigMap and a Pod with an `emptyDir` for the results. It
+uses certificate login. If you need a password, put the config in a Secret instead
+of the ConfigMap. To apply a changed config, delete and recreate the Pod.
 
 ## Prometheus
 
-Scrape `GET /metrics`. Counters survive start/stop and reset with the process.
-There are no percentile gauges or per-row/per-host labels.
+Scrape `GET /metrics`. The counters reset when the process restarts.
 
 ```promql
-# Successful TPS and failed transactions/second
 rate(mini_pgbench_transactions_total[1m])
 rate(mini_pgbench_errors_total[1m])
-
-# Successful p95 latency in seconds
 histogram_quantile(0.95, sum by (le) (rate(mini_pgbench_transaction_duration_seconds_bucket[1m])))
-
-# Running state and database/sql pool utilization
 mini_pgbench_running
 go_sql_in_use_connections{db_name="postgres"}
-go_sql_max_open_connections{db_name="postgres"}
 ```
 
-The official Prometheus histogram covers 50 microseconds through 60 seconds plus
-`+Inf`. The official SQL pool collector also exports idle connections, connection
-wait counts/durations, and connections closed by pool limits.
+The latency histogram has buckets from 50 µs to 60 s. The `go_sql_*` metrics
+describe the PostgreSQL connection pool.
 
-## Tests, builds and vulnerability gate
+## Tests
 
 ```sh
-go test ./...
 go vet ./...
 go test -race ./...
-# Requires Docker and OpenSSL; generates disposable fixture certificates.
-tests/integration.sh
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/mini_pgbench-amd64 .
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/mini_pgbench-arm64 .
-
-# Repeat for linux/arm64.
-docker buildx build --platform linux/amd64 --output type=docker,dest=image.tar .
-docker run --rm -v "$PWD:/work:ro" aquasec/trivy:0.76.0 image \
-  --input /work/image.tar --scanners vuln --severity HIGH,CRITICAL \
-  --exit-code 1 --ignorefile /dev/null
+tests/integration.sh   # needs Docker and OpenSSL
 ```
 
-Without fixture variables, ordinary tests explicitly skip PostgreSQL tests. The
-integration script runs PostgreSQL 18.6 with generated CA/server/client certificates
-and a benchmark role with **NOCREATEDB**, tests standard TLS modes, automatic
-initialization, transactions, pool acquisition cancellation, repeated lifecycle
-changes, process shutdown and fatal SQLite-write behavior. Only the fixture's
-administrator creates its disposable test database.
-
-PR and main CI run tests, race tests, vet, pure-Go builds, mTLS integration and image
-scans on both native architectures. Main publication depends on both passing, then
-builds one final multi-platform OCI archive, scans each platform in that archive,
-and copies that same archive to both shared GHCR tags using Skopeo. It does not
-rebuild after release scans.
-Trivy rejects every HIGH/CRITICAL finding, **including unfixed** findings, with no
-suppression file. Remediate actual dependency/runtime findings rather than bypassing
-the gate. Clean scans describe the database at scan time, not a future guarantee.
-
-Go and dependencies, including runtime indirect modules, were resolved from their
-latest stable upstream releases at implementation time and are pinned in
-`go.mod`/`go.sum`. Keep the project small:
-additional production frameworks, speculative hardening machinery, custom integrity
-gates, host orchestration and features outside this test-tool scope are not goals.
+Without `tests/integration.sh`, the PostgreSQL tests skip. The script starts
+PostgreSQL 18.6 in Docker with generated certificates and a role without
+`CREATEDB`. It then runs the PostgreSQL tests against it.

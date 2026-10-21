@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -19,31 +20,16 @@ import (
 func TestRuntimeHelper(t *testing.T) {
 	path := os.Getenv("MINI_PGBENCH_TEST_CONFIG")
 	if path == "" {
-		return
+		t.Skip("started by TestPostgresRuntime")
 	}
 	os.Args = []string{os.Args[0], "-config", path}
 	main()
-	os.Exit(0)
 }
 
 func TestPostgresRuntime(t *testing.T) {
-	tlsDir := os.Getenv("TEST_PG_TLS")
-	if tlsDir == "" {
-		t.Skip("run tests/integration.sh")
-	}
 	for _, fatal := range []bool{false, true} {
 		t.Run(strconv.FormatBool(fatal), func(t *testing.T) {
-			c := testConfig()
-			c.Postgres.Hosts = []string{"localhost"}
-			c.Postgres.Port, _ = strconv.Atoi(os.Getenv("TEST_PG_PORT"))
-			c.Postgres.Database = "benchmark"
-			c.Postgres.User = "benchmark"
-			c.Postgres.SSLMode = "verify-full"
-			c.Postgres.SSLRootCert = filepath.Join(tlsDir, "ca.crt")
-			c.Postgres.SSLCert = filepath.Join(tlsDir, "client.crt")
-			c.Postgres.SSLKey = filepath.Join(tlsDir, "client.key")
-			c.Pool.MaxOpen = 2
-			c.Pool.MaxIdle = 1
+			c := pgTestConfig(t)
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -79,11 +65,16 @@ func TestPostgresRuntime(t *testing.T) {
 				resp.Body.Close()
 				return resp.StatusCode == 200
 			})
-			resp, err := client.Post(url+"/start", "application/json", nil)
+			resp, err := client.Get(url + "/status")
 			if err != nil {
 				t.Fatal(err)
 			}
+			var status struct{ Running bool }
+			err = json.NewDecoder(resp.Body).Decode(&status)
 			resp.Body.Close()
+			if err != nil || !status.Running {
+				t.Fatalf("not running without POST /start: %+v, %v", status, err)
+			}
 			if fatal {
 				db, e := sql.Open("sqlite", c.SQLitePath)
 				if e != nil {
@@ -94,10 +85,8 @@ func TestPostgresRuntime(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-			} else {
-				if err = cmd.Process.Signal(os.Interrupt); err != nil {
-					t.Fatal(err)
-				}
+			} else if err = cmd.Process.Signal(os.Interrupt); err != nil {
+				t.Fatal(err)
 			}
 			done := make(chan error, 1)
 			go func() { done <- cmd.Wait() }()

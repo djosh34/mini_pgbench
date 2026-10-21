@@ -3,3 +3,6 @@
 *.db-*
 image*.tar
 bin
+*_test.go
+mini_pgbench_gui
+mini_pgbench
