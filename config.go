@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -38,8 +39,8 @@ type Config struct {
 	SQLitePath         string        `yaml:"sqlite_path"`
 }
 
-// Clear libpq/pgx environment inputs once at startup: YAML is the only source
-// of connection settings, including when a shell has PGSERVICE or PGOPTIONS set.
+// clearPostgresEnv unsets the PG* environment variables that pgx reads, so a
+// shell with PGSERVICE or PGOPTIONS set cannot change the connection.
 func clearPostgresEnv() {
 	for _, key := range []string{
 		"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPASSFILE",
@@ -78,7 +79,8 @@ func loadConfig(path string) (Config, error) {
 
 func (c Config) validate() error {
 	p := c.Postgres
-	if len(p.Hosts) == 0 || p.Database == "" || p.User == "" || p.Port < 1 || p.Port > 65535 {
+	if len(p.Hosts) == 0 || p.Database == "" || p.User == "" ||
+		p.Port < 1 || p.Port > 65535 {
 		return fmt.Errorf("postgres hosts, database, user and valid port required")
 	}
 	for _, h := range p.Hosts {
@@ -86,44 +88,43 @@ func (c Config) validate() error {
 			return fmt.Errorf("each host must be a nonempty single hostname or address")
 		}
 	}
-	if c.Workers < 1 || c.Rows < 1 || c.Pool.MaxOpen < 1 || c.Pool.MaxIdle < 0 || c.Pool.MaxIdle > c.Pool.MaxOpen {
+	if c.Workers < 1 || c.Rows < 1 ||
+		c.Pool.MaxOpen < 1 || c.Pool.MaxIdle < 0 || c.Pool.MaxIdle > c.Pool.MaxOpen {
 		return fmt.Errorf("invalid worker, row or pool counts")
 	}
-	if c.ReadWeight < 0 || c.WriteWeight < 0 || c.ReadWeight > int(^uint(0)>>1)-c.WriteWeight || c.ReadWeight+c.WriteWeight == 0 {
+	if c.ReadWeight < 0 || c.WriteWeight < 0 ||
+		c.ReadWeight > math.MaxInt-c.WriteWeight || c.ReadWeight+c.WriteWeight == 0 {
 		return fmt.Errorf("weights must be nonnegative with a positive, non-overflowing sum")
 	}
 	if c.TransactionTimeout < 0 || c.Pool.MaxLifetime < 0 || c.Pool.MaxIdleTime < 0 {
 		return fmt.Errorf("durations must be nonnegative")
 	}
-	if c.Listen == "" || c.SQLitePath == "" || c.SQLitePath == ":memory:" || strings.HasPrefix(c.SQLitePath, "file:") {
+	if c.Listen == "" || c.SQLitePath == "" ||
+		c.SQLitePath == ":memory:" || strings.HasPrefix(c.SQLitePath, "file:") {
 		return fmt.Errorf("listen and a filesystem SQLite path required")
-	}
-	if (p.SSLCert == "") != (p.SSLKey == "") {
-		return fmt.Errorf("sslcert and sslkey must be supplied together")
-	}
-	for _, path := range []string{p.SSLRootCert, p.SSLCert, p.SSLKey} {
-		if path != "" {
-			f, err := os.Open(path)
-			if err != nil {
-				return fmt.Errorf("TLS file: %w", err)
-			}
-			info, err := f.Stat()
-			f.Close()
-			if err != nil {
-				return err
-			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("TLS path is not a regular file")
-			}
-		}
 	}
 	_, err := pgx.ParseConfig(c.dsn())
 	return err
 }
 
 func (c Config) dsn() string {
-	// Explicit values prevent pgx's environment defaults from overriding application settings.
-	quote := func(s string) string { return "'" + strings.NewReplacer("\\", "\\\\", "'", "\\'").Replace(s) + "'" }
+	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+	quote := func(s string) string { return "'" + r.Replace(s) + "'" }
 	p := c.Postgres
-	return fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s sslrootcert=%s sslcert=%s sslkey=%s connect_timeout=0 application_name=mini_pgbench", quote(strings.Join(p.Hosts, ",")), p.Port, quote(p.Database), quote(p.User), quote(p.Password), quote(p.SSLMode), quote(p.SSLRootCert), quote(p.SSLCert), quote(p.SSLKey))
+	// Empty sslrootcert, sslcert and sslkey stop pgx from falling back to the
+	// files in ~/.postgresql.
+	return fmt.Sprintf(
+		"host=%s port=%d dbname=%s user=%s password=%s "+
+			"sslmode=%s sslrootcert=%s sslcert=%s sslkey=%s "+
+			"connect_timeout=0 application_name=mini_pgbench",
+		quote(strings.Join(p.Hosts, ",")),
+		p.Port,
+		quote(p.Database),
+		quote(p.User),
+		quote(p.Password),
+		quote(p.SSLMode),
+		quote(p.SSLRootCert),
+		quote(p.SSLCert),
+		quote(p.SSLKey),
+	)
 }

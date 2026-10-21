@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"time"
 
@@ -16,52 +18,105 @@ import (
 )
 
 type Summary struct {
-	Timestamp time.Time `json:"timestamp"`
-	TPS       int64     `json:"tps"`
-	Errors    int64     `json:"errors"`
-	P50       *float64  `json:"p50_ms"`
-	P95       *float64  `json:"p95_ms"`
-	P99       *float64  `json:"p99_ms"`
+	Timestamp         time.Time `json:"timestamp"`
+	TPS               int64     `json:"tps"`
+	Errors            int64     `json:"errors"`
+	P50               *float64  `json:"p50_ms"`
+	P95               *float64  `json:"p95_ms"`
+	P99               *float64  `json:"p99_ms"`
+	TotalTransactions int64     `json:"total_transactions"`
+	TotalErrors       int64     `json:"total_errors"`
 }
 
 type window struct {
 	successes, errors int64
 	histogram         *hdr.Histogram
 }
+
 type Stats struct {
-	mu                sync.Mutex
-	epoch             time.Time
-	next              int64
-	windows           map[int64]*window
-	history           *sql.DB
+	mu      sync.Mutex
+	epoch   time.Time
+	next    int64
+	windows map[int64]*window
+
+	// Only flush touches these.
+	totalTransactions, totalErrors int64
+
+	history           *sql.DB // writer, one connection
+	reader            *sql.DB // for /results, so a slow download never blocks the writer
 	registry          *prometheus.Registry
 	successes, errors prometheus.Counter
 	latency           prometheus.Histogram
 	running           prometheus.Gauge
 }
 
-func newStats(path string, pool *sql.DB) (*Stats, error) {
-	db, err := sql.Open("sqlite", path)
+const schema = `
+DROP TABLE IF EXISTS summaries;
+CREATE TABLE summaries (
+	second INTEGER PRIMARY KEY,
+	timestamp TEXT NOT NULL,
+	tps INTEGER NOT NULL,
+	errors INTEGER NOT NULL,
+	p50 REAL,
+	p95 REAL,
+	p99 REAL,
+	total_transactions INTEGER NOT NULL,
+	total_errors INTEGER NOT NULL
+)`
+
+func newStats(path string, epoch time.Time, pool *sql.DB) (*Stats, error) {
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	// Reset in place, including after a container restart with the same emptyDir.
-	_, err = db.Exec(`DROP TABLE IF EXISTS summaries; CREATE TABLE summaries (second INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, tps INTEGER NOT NULL, errors INTEGER NOT NULL, p50 REAL, p95 REAL, p99 REAL)`)
+	// Start with an empty history, also after a container restart that keeps the emptyDir.
+	if _, err = db.Exec(schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	reader, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	s := &Stats{epoch: time.Now(), windows: make(map[int64]*window), history: db, registry: prometheus.NewRegistry()}
-	s.successes = prometheus.NewCounter(prometheus.CounterOpts{Name: "mini_pgbench_transactions_total", Help: "Successful committed transactions."})
-	s.errors = prometheus.NewCounter(prometheus.CounterOpts{Name: "mini_pgbench_errors_total", Help: "Failed transactions, excluding explicit stop cancellation."})
-	s.latency = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "mini_pgbench_transaction_duration_seconds", Help: "Successful transaction latency including pool acquisition and commit.", Buckets: []float64{.00005, .0001, .00025, .0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60}})
-	s.running = prometheus.NewGauge(prometheus.GaugeOpts{Name: "mini_pgbench_running", Help: "Whether workload workers are running."})
+	s := &Stats{
+		epoch:    epoch,
+		windows:  make(map[int64]*window),
+		history:  db,
+		reader:   reader,
+		registry: prometheus.NewRegistry(),
+	}
+	s.successes = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mini_pgbench_transactions_total",
+		Help: "Committed transactions.",
+	})
+	s.errors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mini_pgbench_errors_total",
+		Help: "Failed transactions. Transactions cancelled by a stop are not counted.",
+	})
+	s.latency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "mini_pgbench_transaction_duration_seconds",
+		Help: "Latency of committed transactions, including waiting for a pool connection.",
+		Buckets: []float64{
+			.00005, .0001, .00025, .0005, .001, .0025, .005, .01, .025, .05,
+			.1, .25, .5, 1, 2.5, 5, 10, 30, 60,
+		},
+	})
+	s.running = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mini_pgbench_running",
+		Help: "1 while the workload runs, 0 while it is stopped.",
+	})
 	s.registry.MustRegister(s.successes, s.errors, s.latency, s.running)
 	if pool != nil {
 		s.registry.MustRegister(collectors.NewDBStatsCollector(pool, "postgres"))
 	}
 	return s, nil
+}
+
+func (s *Stats) close() error {
+	return errors.Join(s.reader.Close(), s.history.Close())
 }
 
 func (s *Stats) record(elapsed time.Duration, failed bool) {
@@ -70,7 +125,7 @@ func (s *Stats) record(elapsed time.Duration, failed bool) {
 	second := int64(time.Since(s.epoch) / time.Second)
 	w := s.windows[second]
 	if w == nil {
-		w = &window{histogram: hdr.New(1, int64(^uint64(0)>>1)/1000, 3)}
+		w = &window{histogram: hdr.New(1, math.MaxInt64/1000, 3)}
 		s.windows[second] = w
 	}
 	if failed {
@@ -81,40 +136,42 @@ func (s *Stats) record(elapsed time.Duration, failed bool) {
 	w.successes++
 	s.successes.Inc()
 	s.latency.Observe(elapsed.Seconds())
-	micros := elapsed.Microseconds()
-	if micros < 1 {
-		micros = 1
-	}
-	_ = w.histogram.RecordValue(micros)
+	_ = w.histogram.RecordValue(max(elapsed.Microseconds(), 1))
 }
 
+// flush writes one row for every finished second up to now. Only the
+// collector goroutine calls it. It copies the finished windows out under mu,
+// then writes them to SQLite without holding the lock.
 func (s *Stats) flush(now time.Time) error {
-	// The writer is unique. Detach completed windows while holding the outcome lock.
 	s.mu.Lock()
 	end := int64(now.Sub(s.epoch) / time.Second)
-	summaries := make([]Summary, 0)
+	var summaries []Summary
 	first := s.next
-	for s.next < end {
-		i := s.next
-		w := s.windows[i]
-		v := Summary{Timestamp: s.epoch.Add(time.Duration(i) * time.Second).UTC()}
-		if w != nil {
+	for ; s.next < end; s.next++ {
+		v := Summary{Timestamp: s.epoch.Add(time.Duration(s.next) * time.Second).UTC()}
+		if w := s.windows[s.next]; w != nil {
 			v.TPS = w.successes
 			v.Errors = w.errors
 			if w.successes > 0 {
-				a, b, c := float64(w.histogram.ValueAtQuantile(50))/1000, float64(w.histogram.ValueAtQuantile(95))/1000, float64(w.histogram.ValueAtQuantile(99))/1000
-				v.P50 = &a
-				v.P95 = &b
-				v.P99 = &c
+				v.P50 = new(float64(w.histogram.ValueAtQuantile(50)) / 1000)
+				v.P95 = new(float64(w.histogram.ValueAtQuantile(95)) / 1000)
+				v.P99 = new(float64(w.histogram.ValueAtQuantile(99)) / 1000)
 			}
 		}
 		summaries = append(summaries, v)
-		delete(s.windows, i)
-		s.next++
+		delete(s.windows, s.next)
 	}
 	s.mu.Unlock()
 	for i, v := range summaries {
-		if _, err := s.history.Exec(`INSERT INTO summaries VALUES (?, ?, ?, ?, ?, ?, ?)`, first+int64(i), v.Timestamp.Format(time.RFC3339Nano), v.TPS, v.Errors, v.P50, v.P95, v.P99); err != nil {
+		s.totalTransactions += v.TPS
+		s.totalErrors += v.Errors
+		_, err := s.history.Exec(
+			`INSERT INTO summaries (second, timestamp, tps, errors, p50, p95, p99, total_transactions, total_errors)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			first+int64(i), v.Timestamp.Format(time.RFC3339Nano), v.TPS, v.Errors, v.P50, v.P95, v.P99,
+			s.totalTransactions, s.totalErrors,
+		)
+		if err != nil {
 			return fmt.Errorf("write SQLite summary: %w", err)
 		}
 	}
@@ -136,8 +193,19 @@ func (s *Stats) collect(ctx context.Context) error {
 	}
 }
 
-func (s *Stats) results(ctx context.Context, out io.Writer) error {
-	rows, err := s.history.QueryContext(ctx, `SELECT timestamp,tps,errors,p50,p95,p99 FROM summaries ORDER BY second`)
+// results writes the history as a JSON array, oldest first. A positive limit
+// keeps only the latest limit rows. There is one row per second, so that is a
+// primary key range and needs no sort.
+func (s *Stats) results(ctx context.Context, out io.Writer, limit int) error {
+	const columns = `SELECT timestamp, tps, errors, p50, p95, p99, total_transactions, total_errors FROM summaries`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = s.reader.QueryContext(ctx,
+			columns+` WHERE second > (SELECT max(second) FROM summaries) - ? ORDER BY second`, limit)
+	} else {
+		rows, err = s.reader.QueryContext(ctx, columns+` ORDER BY second`)
+	}
 	if err != nil {
 		return err
 	}
@@ -145,15 +213,16 @@ func (s *Stats) results(ctx context.Context, out io.Writer) error {
 	if _, err = io.WriteString(out, "["); err != nil {
 		return err
 	}
+	enc := json.NewEncoder(out)
 	first := true
 	for rows.Next() {
 		var v Summary
 		var stamp string
-		if err = rows.Scan(&stamp, &v.TPS, &v.Errors, &v.P50, &v.P95, &v.P99); err != nil {
+		err = rows.Scan(&stamp, &v.TPS, &v.Errors, &v.P50, &v.P95, &v.P99, &v.TotalTransactions, &v.TotalErrors)
+		if err != nil {
 			return err
 		}
-		v.Timestamp, err = time.Parse(time.RFC3339Nano, stamp)
-		if err != nil {
+		if v.Timestamp, err = time.Parse(time.RFC3339Nano, stamp); err != nil {
 			return err
 		}
 		if !first {
@@ -162,7 +231,7 @@ func (s *Stats) results(ctx context.Context, out io.Writer) error {
 			}
 		}
 		first = false
-		if err = json.NewEncoder(out).Encode(v); err != nil {
+		if err = enc.Encode(v); err != nil {
 			return err
 		}
 	}

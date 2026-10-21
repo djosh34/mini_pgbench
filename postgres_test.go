@@ -9,14 +9,20 @@ import (
 	"time"
 )
 
-func TestPostgres(t *testing.T) {
+// pgTestConfig points at the mTLS PostgreSQL that tests/integration.sh starts.
+func pgTestConfig(t *testing.T) Config {
+	t.Helper()
 	dir := os.Getenv("TEST_PG_TLS")
 	if dir == "" {
-		t.Skip("run tests/integration.sh for disposable mTLS PostgreSQL")
+		t.Skip("run tests/integration.sh for a disposable mTLS PostgreSQL")
+	}
+	port, err := strconv.Atoi(os.Getenv("TEST_PG_PORT"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	c := testConfig()
-	c.Postgres.Hosts = []string{"localhost", "127.0.0.1"}
-	c.Postgres.Port, _ = strconv.Atoi(os.Getenv("TEST_PG_PORT"))
+	c.Postgres.Hosts = []string{"localhost"}
+	c.Postgres.Port = port
 	c.Postgres.Database = "benchmark"
 	c.Postgres.User = "benchmark"
 	c.Postgres.SSLMode = "verify-full"
@@ -25,9 +31,15 @@ func TestPostgres(t *testing.T) {
 	c.Postgres.SSLKey = filepath.Join(dir, "client.key")
 	c.Pool.MaxOpen = 2
 	c.Pool.MaxIdle = 1
+	return c
+}
+
+func TestPostgres(t *testing.T) {
+	c := pgTestConfig(t)
+	c.Postgres.Hosts = []string{"localhost", "127.0.0.1"}
 	c.Pool.MaxLifetime = time.Minute
 	c.Pool.MaxIdleTime = time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	db, pool, err := openPostgres(ctx, c)
 	if err != nil {
@@ -51,12 +63,16 @@ func TestPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	var balance int64
-	db.Raw("SELECT balance FROM mini_pgbench_accounts WHERE id=1").Scan(&balance)
+	if err = db.Raw("SELECT balance FROM mini_pgbench_accounts WHERE id=1").Scan(&balance).Error; err != nil {
+		t.Fatal(err)
+	}
 	if balance != 1 {
 		t.Fatal("initialization reset data")
 	}
 	var count int64
-	db.Raw("SELECT count(*) FROM mini_pgbench_accounts").Scan(&count)
+	if err = db.Raw("SELECT count(*) FROM mini_pgbench_accounts").Scan(&count).Error; err != nil {
+		t.Fatal(err)
+	}
 	if count != c.Rows+2 {
 		t.Fatal("missing seed rows")
 	}
@@ -83,8 +99,10 @@ func TestPostgres(t *testing.T) {
 	}
 	held.Close()
 	s := testStats(t)
-	a := &App{config: c, stats: s, op: func(ctx context.Context, w bool, id int64) error { return transaction(ctx, db, w, id) }}
-	for i := 0; i < 3; i++ {
+	a := &App{config: c, stats: s, op: func(ctx context.Context, w bool, id int64) error {
+		return transaction(ctx, db, w, id)
+	}}
+	for range 3 {
 		a.start()
 		time.Sleep(30 * time.Millisecond)
 		a.stop()
@@ -100,9 +118,9 @@ func TestPostgres(t *testing.T) {
 	}
 	for _, mode := range []string{"allow", "prefer", "require", "verify-ca", "verify-full"} {
 		t.Run(mode, func(t *testing.T) {
-			copy := c
-			copy.Postgres.SSLMode = mode
-			_, p, e := openPostgres(ctx, copy)
+			mc := c
+			mc.Postgres.SSLMode = mode
+			_, p, e := openPostgres(ctx, mc)
 			if e != nil {
 				t.Fatal(e)
 			}

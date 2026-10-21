@@ -10,7 +10,10 @@ import (
 )
 
 func openPostgres(ctx context.Context, c Config) (*gorm.DB, *sql.DB, error) {
-	db, err := gorm.Open(postgres.Open(c.dsn()), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent), DisableAutomaticPing: true})
+	db, err := gorm.Open(postgres.Open(c.dsn()), &gorm.Config{
+		Logger:               logger.Default.LogMode(logger.Silent),
+		DisableAutomaticPing: true,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -30,10 +33,18 @@ func openPostgres(ctx context.Context, c Config) (*gorm.DB, *sql.DB, error) {
 }
 
 func initialize(ctx context.Context, db *gorm.DB, rows int64) error {
-	if err := db.WithContext(ctx).Exec(`CREATE TABLE IF NOT EXISTS mini_pgbench_accounts (id bigint PRIMARY KEY, balance bigint NOT NULL DEFAULT 0)`).Error; err != nil {
+	err := db.WithContext(ctx).Exec(`
+		CREATE TABLE IF NOT EXISTS mini_pgbench_accounts (
+			id bigint PRIMARY KEY,
+			balance bigint NOT NULL DEFAULT 0
+		)`).Error
+	if err != nil {
 		return err
 	}
-	return db.WithContext(ctx).Exec(`INSERT INTO mini_pgbench_accounts (id, balance) SELECT generate_series(1, ?::bigint), 0 ON CONFLICT (id) DO NOTHING`, rows).Error
+	return db.WithContext(ctx).Exec(`
+		INSERT INTO mini_pgbench_accounts (id, balance)
+		SELECT generate_series(1, ?::bigint), 0
+		ON CONFLICT (id) DO NOTHING`, rows).Error
 }
 
 func transaction(ctx context.Context, db *gorm.DB, write bool, id int64) error {
