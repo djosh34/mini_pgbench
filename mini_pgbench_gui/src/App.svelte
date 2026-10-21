@@ -55,17 +55,17 @@
     } finally {
       if (gen === generation) {
         loaded = true;
-        timer = setTimeout(poll, pollMs);
+        if (!paused) timer = setTimeout(poll, pollMs);
       }
     }
   }
 
-  // restart reloads the whole range, then polls again unless paused.
+  // restart loads the whole range once, then keeps polling unless paused.
   function restart() {
     generation++;
     clearTimeout(timer);
     reload = true;
-    if (!paused) poll();
+    poll();
   }
 
   function chooseRange(r: (typeof ranges)[number]) {
@@ -78,7 +78,9 @@
 
   function togglePause() {
     paused = !paused;
-    restart();
+    // A request still in flight finishes and is shown, but schedules no next poll.
+    if (paused) clearTimeout(timer);
+    else restart();
   }
 
   async function switchWorkload(start: boolean) {
