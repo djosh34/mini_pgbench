@@ -40,7 +40,12 @@ func testConfig() Config {
 
 func waitFor(t *testing.T, f func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	waitForWithin(t, 2*time.Second, f)
+}
+
+func waitForWithin(t *testing.T, timeout time.Duration, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for !f() {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out")
