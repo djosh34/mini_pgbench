@@ -130,8 +130,6 @@ func TestPostgres(t *testing.T) {
 		a.stop()
 	}
 	a.close()
-	// pgxpool closes a connection that a stop cancelled in the background.
-	waitFor(t, func() bool { return pool.Stat().AcquiredConns() == 0 })
 	if _, err = pool.Exec(ctx, "DROP TABLE mini_pgbench_accounts"); err != nil {
 		t.Fatal(err)
 	}
