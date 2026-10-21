@@ -120,7 +120,7 @@
   <header class="flex flex-wrap items-end justify-between gap-x-10 gap-y-5">
     <div class="flex flex-wrap items-end gap-x-10 gap-y-4">
       <h1 class="font-display text-2xl font-semibold tracking-tight text-ink">mini_pgbench</h1>
-      <dl class="flex gap-x-8">
+      <dl class="flex flex-wrap gap-x-8 gap-y-4">
         <div>
           <dt class="text-sm text-muted">Total transactions</dt>
           <dd class="font-display text-3xl leading-tight font-semibold text-tps tabular-nums">
@@ -131,6 +131,18 @@
           <dt class="text-sm text-muted">Total errors</dt>
           <dd class="font-display text-3xl leading-tight font-semibold text-errors tabular-nums">
             {latest ? number.format(latest.totalErrors) : "0"}
+          </dd>
+        </div>
+        <div class="border-l border-grid pl-8">
+          <dt class="text-sm text-muted">Transactions per second</dt>
+          <dd class="font-display text-3xl leading-tight font-semibold text-tps tabular-nums">
+            {latest ? number.format(latest.tps) : "0"}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-sm text-muted">Errors per second</dt>
+          <dd class="font-display text-3xl leading-tight font-semibold text-errors tabular-nums">
+            {latest ? number.format(latest.errors) : "0"}
           </dd>
         </div>
       </dl>
