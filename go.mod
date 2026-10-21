@@ -1,6 +1,6 @@
 module github.com/djosh34/mini_pgbench
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/HdrHistogram/hdrhistogram-go v1.4.0
