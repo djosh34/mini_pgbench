@@ -73,7 +73,7 @@ func run() error {
 		_ = server.Close()
 	}
 	cancelCollect()
-	// collectDone is closed after its one value, so this never blocks twice.
+	// If the select above already took the collector's result, this receives nil from the closed channel.
 	if collectErr := <-collectDone; collectErr != nil {
 		err = collectErr
 	}
