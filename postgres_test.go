@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,66 +43,86 @@ func TestPostgres(t *testing.T) {
 	c.Pool.MaxIdleTime = time.Second
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	db, pool, err := openPostgres(ctx, c)
+	pool, err := openPostgres(ctx, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
 	var createdb bool
-	if err = db.Raw("SELECT rolcreatedb FROM pg_roles WHERE rolname=current_user").Scan(&createdb).Error; err != nil || createdb {
+	if err = pool.QueryRow(ctx, "SELECT rolcreatedb FROM pg_roles WHERE rolname=current_user").Scan(&createdb); err != nil || createdb {
 		t.Fatalf("benchmark role CREATEDB=%v, %v", createdb, err)
 	}
-	if err = initialize(ctx, db, c.Rows); err != nil {
+	if err = initialize(ctx, pool, c.Rows); err != nil {
 		t.Fatal(err)
 	}
-	if err = transaction(ctx, db, false, 1); err != nil {
+	if err = transaction(ctx, pool, false, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err = transaction(ctx, db, true, 1); err != nil {
+	if err = transaction(ctx, pool, true, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err = initialize(ctx, db, c.Rows+2); err != nil {
+	if err = initialize(ctx, pool, c.Rows+2); err != nil {
 		t.Fatal(err)
 	}
 	var balance int64
-	if err = db.Raw("SELECT balance FROM mini_pgbench_accounts WHERE id=1").Scan(&balance).Error; err != nil {
+	if err = pool.QueryRow(ctx, "SELECT balance FROM mini_pgbench_accounts WHERE id=1").Scan(&balance); err != nil {
 		t.Fatal(err)
 	}
 	if balance != 1 {
 		t.Fatal("initialization reset data")
 	}
 	var count int64
-	if err = db.Raw("SELECT count(*) FROM mini_pgbench_accounts").Scan(&count).Error; err != nil {
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM mini_pgbench_accounts").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != c.Rows+2 {
 		t.Fatal("missing seed rows")
 	}
-	if pool.Stats().MaxOpenConnections != 2 {
+	if pool.Stat().MaxConns() != 2 {
 		t.Fatal("pool max open")
+	}
+	ps, err := newStats(filepath.Join(t.TempDir(), "results.db"), time.Now(), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ps.close()
+	w := httptest.NewRecorder()
+	(&App{stats: ps}).handler().ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(w.Body.String(), "\nmini_pgbench_pool_max_connections 2\n") {
+		t.Fatalf("pool metrics missing: %s", w.Body.String())
+	}
+	// Reading a missing row is an error.
+	if err = transaction(ctx, pool, false, c.Rows+3); err == nil {
+		t.Fatal("missing row not reported")
 	}
 	// Cancelling the context must interrupt a query that is blocked inside PostgreSQL.
 	short, stop := context.WithTimeout(ctx, 30*time.Millisecond)
 	defer stop()
 	start := time.Now()
-	if err = db.WithContext(short).Exec("SELECT pg_sleep(10)").Error; err == nil || time.Since(start) > time.Second {
+	if _, err = pool.Exec(short, "SELECT pg_sleep(10)"); err == nil || time.Since(start) > time.Second {
 		t.Fatalf("query cancellation: %v", err)
 	}
 	// The timeout also covers the wait for the only pool connection.
-	pool.SetMaxOpenConns(1)
-	held, err := pool.Conn(ctx)
+	one := c
+	one.Pool.MaxOpen = 1
+	single, err := openPostgres(ctx, one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := single.Acquire(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	short2, stop2 := context.WithTimeout(ctx, 30*time.Millisecond)
 	defer stop2()
-	if err = transaction(short2, db, false, 1); err == nil {
+	if err = transaction(short2, single, false, 1); err == nil {
 		t.Fatal("pool acquisition not cancelled")
 	}
-	held.Close()
+	held.Release()
+	single.Close()
 	s := testStats(t)
 	a := &App{config: c, stats: s, op: func(ctx context.Context, w bool, id int64) error {
-		return transaction(ctx, db, w, id)
+		return transaction(ctx, pool, w, id)
 	}}
 	for range 3 {
 		a.start()
@@ -108,19 +130,19 @@ func TestPostgres(t *testing.T) {
 		a.stop()
 	}
 	a.close()
-	// database/sql can finish the rollback after a cancellation in the background.
-	waitFor(t, func() bool { return pool.Stats().InUse == 0 })
-	if err = db.Exec("DROP TABLE mini_pgbench_accounts").Error; err != nil {
+	// pgxpool closes a connection that a stop cancelled in the background.
+	waitFor(t, func() bool { return pool.Stat().AcquiredConns() == 0 })
+	if _, err = pool.Exec(ctx, "DROP TABLE mini_pgbench_accounts"); err != nil {
 		t.Fatal(err)
 	}
-	if err = transaction(ctx, db, false, 1); err == nil {
+	if err = transaction(ctx, pool, false, 1); err == nil {
 		t.Fatal("missing table error swallowed")
 	}
 	for _, mode := range []string{"allow", "prefer", "require", "verify-ca", "verify-full"} {
 		t.Run(mode, func(t *testing.T) {
 			mc := c
 			mc.Postgres.SSLMode = mode
-			_, p, e := openPostgres(ctx, mc)
+			p, e := openPostgres(ctx, mc)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -129,12 +151,12 @@ func TestPostgres(t *testing.T) {
 	}
 	c.Postgres.SSLCert = ""
 	c.Postgres.SSLKey = ""
-	if _, p, e := openPostgres(ctx, c); e == nil {
+	if p, e := openPostgres(ctx, c); e == nil {
 		p.Close()
 		t.Fatal("mTLS accepted without client certificate")
 	}
 	c.Postgres.SSLMode = "disable"
-	if _, p, e := openPostgres(ctx, c); e == nil {
+	if p, e := openPostgres(ctx, c); e == nil {
 		p.Close()
 		t.Fatal("fixture unexpectedly accepts plaintext")
 	}

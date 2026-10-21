@@ -12,8 +12,8 @@ import (
 	"time"
 
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
 	_ "modernc.org/sqlite"
 )
 
@@ -64,7 +64,7 @@ CREATE TABLE summaries (
 	total_errors INTEGER NOT NULL
 )`
 
-func newStats(path string, epoch time.Time, pool *sql.DB) (*Stats, error) {
+func newStats(path string, epoch time.Time, pool *pgxpool.Pool) (*Stats, error) {
 	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -110,7 +110,7 @@ func newStats(path string, epoch time.Time, pool *sql.DB) (*Stats, error) {
 	})
 	s.registry.MustRegister(s.successes, s.errors, s.latency, s.running)
 	if pool != nil {
-		s.registry.MustRegister(collectors.NewDBStatsCollector(pool, "postgres"))
+		s.registry.MustRegister(poolCollector{pool})
 	}
 	return s, nil
 }

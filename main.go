@@ -24,12 +24,12 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	db, pool, err := openPostgres(ctx, c)
+	pool, err := openPostgres(ctx, c)
 	if err != nil {
 		return fmt.Errorf("connect PostgreSQL: %w", err)
 	}
 	defer pool.Close()
-	if err = initialize(ctx, db, c.Rows); err != nil {
+	if err = initialize(ctx, pool, c.Rows); err != nil {
 		return fmt.Errorf("initialize benchmark table: %w", err)
 	}
 	// The history starts at process start, so the seconds spent connecting show up as idle rows.
@@ -42,7 +42,7 @@ func run() error {
 		config: c,
 		stats:  stats,
 		op: func(ctx context.Context, write bool, id int64) error {
-			return transaction(ctx, db, write, id)
+			return transaction(ctx, pool, write, id)
 		},
 	}
 	listener, err := net.Listen("tcp", c.Listen)
